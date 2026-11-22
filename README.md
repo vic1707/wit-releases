@@ -21,6 +21,10 @@ Archives contain `bin/` and `share/wit/` (title databases, found relative to the
 
 ## Releasing a new upstream version
 
+Upstream has no tags. [Renovate](renovate.json) tracks its `master` branch through `UPSTREAM_MASTER`
+in `xmake.lua` and opens a PR when it moves, which is your cue to release. Renovate also keeps the
+SHA-pinned GitHub Actions and the xmake version in `.mise.toml` up to date.
+
 1. Add the upstream commit to `VERSIONS` in [`xmake.lua`](xmake.lua) (newest first):
    ```lua
    {"3.06", "<upstream commit sha>"},

@@ -13,6 +13,12 @@ local VERSIONS = {
     {"3.05a", "fc1c0b840cb3ac41ca6e4f1d5e16da12b47eab58"},
 }
 
+-- Latest commit of upstream's master branch, kept current by Renovate (renovate.json).
+-- A Renovate PR bumping it means upstream moved: to release that commit, add it to
+-- VERSIONS with the version from upstream's project/Makefile (VERSION_NUM).
+-- Not used by the build.
+local UPSTREAM_MASTER = "fc1c0b840cb3ac41ca6e4f1d5e16da12b47eab58"
+
 package("wiimms-iso-tools")
     set_kind("binary")
     set_homepage("https://wit.wiimm.de/")

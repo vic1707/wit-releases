@@ -1,0 +1,25 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track Wiimm/wiimms-iso-tools master (UPSTREAM_MASTER in xmake.lua)",
+      "managerFilePatterns": ["/^xmake\\.lua$/"],
+      "matchStrings": ["local UPSTREAM_MASTER = \"(?<currentDigest>[0-9a-f]{40})\""],
+      "currentValueTemplate": "master",
+      "depNameTemplate": "wiimms-iso-tools",
+      "packageNameTemplate": "https://github.com/Wiimm/wiimms-iso-tools",
+      "datasourceTemplate": "git-refs"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchDepNames": ["wiimms-iso-tools"],
+      "commitMessageTopic": "upstream wiimms-iso-tools master",
+      "prBodyNotes": [
+        "Upstream `master` moved. This does **not** release anything by itself: to publish it, add `{\"<version>\", \"<sha>\"}` to `VERSIONS` in `xmake.lua` (version = `VERSION_NUM` in upstream's `project/Makefile` at that commit), then push tag `v<version>`."
+      ]
+    }
+  ]
+}
