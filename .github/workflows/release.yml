@@ -123,7 +123,9 @@ jobs:
 
       - uses: cygwin/cygwin-install-action@v7
         with:
-          packages: gcc-core make zlib-devel libncurses-devel zip
+          # libssl-devel makes upstream use OpenSSL's SHA1 (USE_SHA_LIB), like its own Cygwin
+          # builds: the bundled sha1-cygwin64.s uses the SysV ABI and segfaults on Cygwin.
+          packages: gcc-core make zlib-devel libncurses-devel libssl-devel zip
           add-to-path: false
 
       - name: Build
@@ -131,6 +133,9 @@ jobs:
           export PATH=/usr/local/bin:/usr/bin:$PATH
           cd upstream/project
           make -j"$(nproc)" wit wwt wdf
+          grep -q 'USE_SHA_LIB' <(make flags) || { echo "::error::USE_SHA_LIB not enabled"; exit 1; }
+          # a crash can still exit 0 inside Cygwin, so check the output
+          ./wit.exe --version | grep -F "v$VERSION"
 
       - name: Package
         run: |
@@ -155,14 +160,18 @@ jobs:
           mkdir -p dist
           (cd "$out" && zip -r "$GITHUB_WORKSPACE/dist/$ARCHIVE" bin gpl-2.0.txt)
 
-      - name: Smoke test (outside Cygwin)
+      - name: Smoke test (outside Cygwin, bundled DLLs only)
         shell: pwsh
         run: |
           $dir = Join-Path $env:RUNNER_TEMP wit
           Expand-Archive "dist/$env:ARCHIVE" $dir
           foreach ($tool in 'wit','wwt','wdf') {
-            & "$dir/bin/$tool.exe" --version
-            if ($LASTEXITCODE -ne 0) { exit 1 }
+            $out = & "$dir/bin/$tool.exe" --version 2>&1 | Out-String
+            Write-Host $out
+            if ($LASTEXITCODE -ne 0 -or -not $out.Contains("v$env:VERSION")) {
+              Write-Host "::error::$tool.exe failed (exit code $LASTEXITCODE)"
+              exit 1
+            }
           }
 
       - uses: actions/upload-artifact@v7
