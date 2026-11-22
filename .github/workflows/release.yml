@@ -1,0 +1,213 @@
+name: release
+
+# Push tag v<version> (listed in VERSIONS of xmake.lua) to build and publish a release.
+# A suffix (v3.05a-rc1) builds the same upstream version but publishes a prerelease.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build, e.g. v3.05a
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      sha: ${{ steps.v.outputs.sha }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+      - id: v
+        run: |
+          tag="${TAG#v}"
+          version="${tag%%-*}"
+          # VERSIONS entries look like:  {"3.05a", "<40 hex sha>"},
+          sha=$(awk -F'"' -v v="$version" '$1 ~ /^[[:space:]]*\{$/ && $2 == v { print $4; exit }' xmake.lua)
+          if [[ ! $sha =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::version '$version' (from tag $TAG) is not listed in VERSIONS of xmake.lua"
+            exit 1
+          fi
+          prerelease=false
+          [[ $tag == "$version" ]] || prerelease=true
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >>"$GITHUB_OUTPUT"
+          echo "Building wit $version from Wiimm/wiimms-iso-tools@$sha (prerelease=$prerelease)" >>"$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, asset: linux-x86_64 }
+          - { runner: ubuntu-24.04-arm, asset: linux-aarch64 }
+          - { runner: macos-15, asset: macos-arm64 }
+          - { runner: macos-15-intel, asset: macos-x86_64 }
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      ARCHIVE: wit-v${{ needs.resolve.outputs.version }}-${{ matrix.asset }}.tar.gz
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: jdx/mise-action@v5 # installs the xmake pinned in .mise.toml
+
+      - name: Install system deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libncurses-dev
+
+      - name: Build
+        run: |
+          xmake f -y -v --wit_version="$VERSION"
+          xmake -y -v
+
+      - name: Smoke test
+        run: |
+          test -f "build/dist/$ARCHIVE"
+          dir=$(cd "$(mktemp -d)" && pwd -P)
+          tar -xzf "build/dist/$ARCHIVE" -C "$dir"
+          ls -lR "$dir/bin"
+          for tool in wit wwt wdf wdf-cat wdf-dump; do
+            "$dir/bin/$tool" --version | tee /dev/stderr | grep -F "v$VERSION" >/dev/null
+          done
+          "$dir/bin/wit" version -ll
+          "$dir/bin/wit" config | grep -F "$dir/share/wit"
+          if [[ $RUNNER_OS == Linux ]]; then
+            file "$dir/bin/wit" | tee /dev/stderr | grep -Eq 'statically linked|static-pie linked'
+          else
+            otool -L "$dir/bin/wit"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset }}
+          path: build/dist/${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  # Upstream only supports Windows through Cygwin (termios, sys/ioctl, ...), so this
+  # job uses upstream's own Makefile inside Cygwin and ships the needed Cygwin DLLs.
+  windows:
+    needs: resolve
+    runs-on: windows-latest
+    continue-on-error: true
+    env:
+      VERSION: ${{ needs.resolve.outputs.version }}
+      ARCHIVE: wit-v${{ needs.resolve.outputs.version }}-windows-x86_64.zip
+    defaults:
+      run:
+        shell: C:\cygwin\bin\bash.exe --noprofile --norc -eo pipefail -o igncr '{0}'
+    steps:
+      - name: Keep LF line endings (upstream ships bash scripts)
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          repository: Wiimm/wiimms-iso-tools
+          ref: ${{ needs.resolve.outputs.sha }}
+          path: upstream
+
+      - uses: cygwin/cygwin-install-action@v7
+        with:
+          packages: gcc-core make zlib-devel libncurses-devel zip
+          add-to-path: false
+
+      - name: Build
+        run: |
+          export PATH=/usr/local/bin:/usr/bin:$PATH
+          cd upstream/project
+          make -j"$(nproc)" wit wwt wdf
+
+      - name: Package
+        run: |
+          export PATH=/usr/local/bin:/usr/bin:$PATH
+          src=upstream/project
+          out=$(mktemp -d)
+          mkdir -p "$out/bin"
+          cp "$src"/{wit,wwt,wdf}.exe "$out/bin/"
+          cp "$src/wdf.exe" "$out/bin/wdf-cat.exe"
+          cp "$src/wdf.exe" "$out/bin/wdf-dump.exe"
+          # Cygwin builds look for share files next to the binaries (see upstream gen-distrib)
+          cp "$src"/share/*.txt "$out/bin/"
+          cp "$src/gpl-2.0.txt" "$out/"
+          # bundle every Cygwin DLL the tools load
+          for exe in "$out"/bin/{wit,wwt,wdf}.exe; do
+            cygcheck "$(cygpath -w "$exe")" | tr -d '\r' | sed 's/^ *//' | while read -r dll; do
+              dll=$(cygpath -u "$dll" 2>/dev/null) || continue
+              if [[ $dll == /usr/bin/*.dll ]]; then cp -n "$dll" "$out/bin/"; fi
+            done
+          done
+          ls -l "$out/bin"
+          mkdir -p dist
+          (cd "$out" && zip -r "$GITHUB_WORKSPACE/dist/$ARCHIVE" bin gpl-2.0.txt)
+
+      - name: Smoke test (outside Cygwin)
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP wit
+          Expand-Archive "dist/$env:ARCHIVE" $dir
+          foreach ($tool in 'wit','wwt','wdf') {
+            & "$dir/bin/$tool.exe" --version
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-x86_64
+          path: dist/${{ env.ARCHIVE }}
+          if-no-files-found: error
+
+  release:
+    needs: [resolve, build, windows]
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.resolve.outputs.version }}
+      SHA: ${{ needs.resolve.outputs.sha }}
+      PRERELEASE: ${{ needs.resolve.outputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        run: cd dist && sha256sum * | tee SHA256SUMS
+
+      - name: Publish
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            exit 0
+          fi
+          cat >notes.md <<EOF
+          Wiimms ISO Tools **$VERSION** (wit, wwt, wdf), built from upstream
+          [Wiimm/wiimms-iso-tools@${SHA:0:7}](https://github.com/Wiimm/wiimms-iso-tools/commit/$SHA).
+
+          Install with [mise](https://mise.jdx.dev):
+
+          \`\`\`sh
+          mise use github:$GH_REPO@${TAG#v}
+          \`\`\`
+          EOF
+          flags=()
+          [[ $PRERELEASE == true ]] && flags+=(--prerelease)
+          gh release create "$TAG" dist/* --verify-tag --title "wit ${TAG#v}" --notes-file notes.md "${flags[@]}"
